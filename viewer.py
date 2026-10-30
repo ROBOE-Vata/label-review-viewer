@@ -9,6 +9,7 @@
 검수 결과는 그 폴더의 review_results.json 에 즉시 저장된다.
 """
 import argparse
+import collections
 import csv
 import gzip
 import io
@@ -18,8 +19,9 @@ import shutil
 import threading
 import time
 import webbrowser
+import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 try:
     import cv2
@@ -159,6 +161,7 @@ class Session:
         self.tiny, self.overlap, self.lock = tiny, overlap, threading.Lock()
         self.data_dir = None
         self.payload, self.files, self.img_dir, self.store, self.dataset = None, set(), None, None, None
+        self.results = {}  # 완료 버튼으로 만든 zip: 파일명 -> 경로
 
     def open(self, path):
         data_dir = find_data_dir(path)
@@ -224,6 +227,15 @@ def make_handler(session):
                         ("Content-Disposition", 'attachment; filename="review_%s_%s.csv"' % (
                             os.path.basename(session.data_dir), time.strftime("%Y%m%d_%H%M%S"))),
                         ("Cache-Control", "no-store")])
+                elif path == "/api/finish/download":
+                    name = parse_qs(urlparse(self.path).query).get("name", [""])[0]
+                    fp = session.results.get(name)
+                    if not fp:
+                        return self._send(b"not found", "text/plain", 404)
+                    with open(fp, "rb") as f:
+                        body = f.read()
+                    self._send(body, "application/zip", extra=[
+                        ("Content-Disposition", "attachment; filename=\"%s\"" % name), ("Cache-Control", "no-store")])
                 elif path.startswith("/img/") and path[5:] in files:
                     fp = os.path.join(img_dir, path[5:])
                     with open(fp, "rb") as f:
@@ -251,6 +263,14 @@ def make_handler(session):
                     return self._json({"path": session.open(str(body.get("path", "")))})
                 except (ValueError, KeyError, OSError) as e:
                     return self._json({"error": str(e)}, 400)
+            if route == "/api/finish":
+                dataset, _, store, _, _ = session.snapshot()
+                if dataset is None:
+                    return self._json({"error": "열린 데이터셋이 없습니다"}, 409)
+                try:
+                    return self._json(self._finish(dataset, store))
+                except OSError as e:
+                    return self._json({"error": str(e)}, 500)
             if route != "/api/review":
                 return self._send(b"not found", "text/plain", 404)
             dataset, _, store, files, _ = session.snapshot()
@@ -269,6 +289,36 @@ def make_handler(session):
                 self._json({"ok": True})
             except (ValueError, KeyError, TypeError) as e:
                 self._json({"error": str(e)}, 400)
+
+        def _finish(self, dataset, store):
+            """검수 결과를 데이터셋 폴더 옆에 zip 하나로 묶는다 (이미지는 제외)."""
+            data_dir = session.data_dir
+            name = os.path.basename(data_dir)
+            stamp = time.strftime("%Y%m%d_%H%M%S")
+            zname = "%s_review_%s.zip" % (name, stamp)
+            zpath = os.path.join(os.path.dirname(data_dir), zname)
+            with store.lock:
+                review = json.loads(json.dumps(store.data))
+            st = {im["file"]: review.get(im["file"], {}).get("status", "") for im in dataset["images"]}
+            cnt = collections.Counter(s or "none" for s in st.values())
+            lists = {s: [f for f, x in st.items() if x == s] for s in STATUSES}
+            summary = ["데이터셋: %s" % data_dir, "완료 시각: %s" % time.strftime("%Y-%m-%d %H:%M:%S"),
+                       "이미지 %d장: OK %d / NG %d / 보류 %d / 미검수 %d" % (
+                           len(st), cnt["ok"], cnt["ng"], cnt["hold"], cnt["none"])]
+            folder = name + "_review/"
+            tmp = zpath + ".tmp"
+            with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
+                z.write(os.path.join(data_dir, "_annotations.coco.json"), folder + "_annotations.coco.json")
+                z.writestr(folder + "review_results.json", json.dumps(review, ensure_ascii=False, indent=1))
+                z.writestr(folder + "review.csv", self._csv(dataset, store))
+                for s in STATUSES:
+                    z.writestr(folder + "%s_files.txt" % s, "".join(f + "\n" for f in lists[s]))
+                z.writestr(folder + "summary.txt", "\n".join(summary) + "\n")
+            os.replace(tmp, zpath)
+            session.results[zname] = zpath
+            print("완료: %s\n  %s" % (zpath, summary[2]), flush=True)
+            return {"path": zpath, "name": zname, "ok": cnt["ok"], "ng": cnt["ng"],
+                    "hold": cnt["hold"], "none": cnt["none"]}
 
         @staticmethod
         def _csv(dataset, store):
