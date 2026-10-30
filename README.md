@@ -19,7 +19,7 @@ python3 viewer.py
 화면 위쪽 칸에 **데이터셋 폴더 경로**에 데이터셋 경로를 넣고 Enter(또는 **열기**)를 누르면 됩니다.
 
 ```
-/home/roboe/superbai/data/superbai_batch02_2993ea_261028/superbai_batch02_2993ea_261028_parts/superbai_batch02_2993ea_261028_part1_vata
+/home/roboe/superbai/data/superbai_batch02_2993ea_261028/superbai_batch02_2993ea_261028_parts/superbai_batch02_2993ea_261028_part1_{vata/woody/mark}
 ```
 
 
